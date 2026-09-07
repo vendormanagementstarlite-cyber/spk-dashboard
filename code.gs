@@ -40,8 +40,30 @@ function withRetry_(fn, attempts, label) {
 }
 
 // ----------------------------------------------------------------------
-// KONFIGURASI A: SPK TAKEOVER (tab "TEMPLATE TAKEOVER PDF WORD")
+// GANTI PLACEHOLDER LEBIH CEPAT — sebelumnya, tiap nama alternatif untuk
+// 1 field (mis. NO_PO bisa ditulis "NO_PO", "NO PO", atau "NOMOR PO" di
+// template) memanggil body.replaceText() TERPISAH untuk masing-masing
+// variasi -- padahal itu artinya 1 field bisa makan 2-3 panggilan ke
+// Google Docs. Setiap panggilan replaceText() adalah satu kali
+// bolak-balik jaringan ke server Google, jadi makin sedikit panggilan
+// = makin cepat. Fungsi ini menggabungkan semua variasi nama jadi SATU
+// pola regex (pakai "atau"/"|"), sehingga cukup SATU panggilan
+// replaceText() per field, walau field itu punya banyak nama alternatif.
+// Hasil akhirnya identik -- cuma jalannya lebih cepat.
 // ----------------------------------------------------------------------
+function replaceAliasesMerged_(body, aliases, data, escapeRegex) {
+  Object.keys(aliases).forEach(function (dataKey) {
+    const value = data[dataKey];
+    if (value === undefined) return;
+    const patterns = aliases[dataKey].map(function (name) {
+      return '\\{\\{?' + escapeRegex(name) + '\\}?\\}';
+    });
+    const combined = patterns.length > 1 ? '(?:' + patterns.join('|') + ')' : patterns[0];
+    body.replaceText(combined, String(value));
+  });
+}
+
+
 const TAKEOVER = {
   SHEET_NAME: 'TEMPLATE TAKEOVER PDF WORD',
   TEMPLATE_ID: '16bOel7w5-Pz5jpdp7f7wqsT-yJKxCs-B3VvpOOgUtWg',
@@ -241,18 +263,37 @@ function normalizeNoSpk_(value) {
 // Cari baris lain (selain currentRow) pada kolom colIndex di sheet yang
 // nilainya sama persis dengan value (setelah dirapikan/normalize).
 // Kembalikan nomor baris pertama yang bentrok, atau null kalau aman.
+// ----------------------------------------------------------------------
+// CACHE KOLOM NO SPK — dibaca SEKALI per sheet per proses (bukan sekali
+// per dokumen). Sebelumnya, findDuplicateNoSpkRow_ /
+// findDuplicateNoSpkRowBBPercepatan_ membaca ULANG seluruh kolom NO SPK
+// dari Google Sheets setiap kali dipanggil -- kalau generate massal 20
+// dokumen dari tab yang sama, itu 20x baca ulang data yang ISINYA SAMA
+// PERSIS. Ini salah satu penyebab generate massal terasa lambat. Cache
+// ini otomatis segar lagi tiap kali ada permintaan baru (buka dashboard
+// lagi / klik Generate lagi), jadi tidak pernah basi antar sesi.
+// ----------------------------------------------------------------------
+const _colValuesCache_ = {};
+function getColumnValuesCached_(sheet, colIndex) {
+  const key = sheet.getSheetId() + ':' + colIndex;
+  if (!_colValuesCache_[key]) {
+    const lastRow = sheet.getLastRow();
+    _colValuesCache_[key] = lastRow < FIRST_DATA_ROW
+      ? []
+      : sheet.getRange(FIRST_DATA_ROW, colIndex, lastRow - FIRST_DATA_ROW + 1, 1).getValues().map(function (r) { return r[0]; });
+  }
+  return _colValuesCache_[key];
+}
+
 function findDuplicateNoSpkRow_(sheet, colIndex, currentRow, value) {
   const normalized = normalizeNoSpk_(value);
   if (!normalized) return null;
 
-  const lastRow = sheet.getLastRow();
-  if (lastRow < FIRST_DATA_ROW) return null;
-
-  const colValues = sheet.getRange(FIRST_DATA_ROW, colIndex, lastRow - FIRST_DATA_ROW + 1, 1).getValues();
+  const colValues = getColumnValuesCached_(sheet, colIndex);
   for (let i = 0; i < colValues.length; i++) {
     const r = FIRST_DATA_ROW + i;
     if (r === currentRow) continue;
-    if (normalizeNoSpk_(colValues[i][0]) === normalized) return r;
+    if (normalizeNoSpk_(colValues[i]) === normalized) return r;
   }
   return null;
 }
@@ -333,11 +374,11 @@ function findDuplicateNoSpkRowBBPercepatan_(sheet, config, colIndex, currentRow,
 
   const currentGroupKey = bbPercepatanGroupKeyForRow_(sheet, config, currentRow);
 
-  const colValues = sheet.getRange(FIRST_DATA_ROW, colIndex, lastRow - FIRST_DATA_ROW + 1, 1).getValues();
+  const colValues = getColumnValuesCached_(sheet, colIndex);
   for (let i = 0; i < colValues.length; i++) {
     const r = FIRST_DATA_ROW + i;
     if (r === currentRow) continue;
-    if (normalizeNoSpk_(colValues[i][0]) !== normalized) continue;
+    if (normalizeNoSpk_(colValues[i]) !== normalized) continue;
     const otherGroupKey = bbPercepatanGroupKeyForRow_(sheet, config, r);
     if (otherGroupKey && otherGroupKey === currentGroupKey) continue; // 1 dokumen yang sama -> boleh sama
     return r;
@@ -896,14 +937,7 @@ function generateForRow(sheet, row, config) {
     return s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
   };
 
-  Object.keys(ALIASES).forEach(function (dataKey) {
-    const value = data[dataKey];
-    if (value === undefined) return;
-    ALIASES[dataKey].forEach(function (name) {
-      const pattern = '\\{\\{?' + escapeRegex(name) + '\\}?\\}';
-      body.replaceText(pattern, String(value));
-    });
-  });
+  replaceAliasesMerged_(body, ALIASES, data, escapeRegex);
 
   // 2b. Isi placeholder tanggal hari ini (Bahasa Indonesia) — dihitung
   //     saat dokumen dibuat, bukan dari data sheet. Aman untuk semua
@@ -1200,14 +1234,7 @@ function generateBBPercepatanForGroup_(sheet, config, groupKeyValue) {
     return s.replace(/[.*+?^\${}()|[\]\\\/]/g, '\\\$&');
   };
 
-  Object.keys(ALIASES).forEach(function (dataKey) {
-    const value = data[dataKey];
-    if (value === undefined) return;
-    ALIASES[dataKey].forEach(function (name) {
-      const pattern = '\\{\\{?' + escapeRegex(name) + '\\}?\\}';
-      body.replaceText(pattern, String(value));
-    });
-  });
+  replaceAliasesMerged_(body, ALIASES, data, escapeRegex);
 
   // Placeholder tanggal hari ini, sama seperti config lainnya.
   const HARI_ID = ['Senin', 'Selasa', 'Rabu', 'Kamis', "Jum'at", 'Sabtu', 'Minggu'];
