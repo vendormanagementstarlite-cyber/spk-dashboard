@@ -322,6 +322,14 @@
     }
     .gen-btn:hover { background: rgba(217,164,65,0.26); }
     .gen-btn:disabled { opacity: .6; cursor: default; }
+    .del-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--red-soft); color: var(--red); border: 1px solid rgba(255,139,160,0.4);
+      padding: 6px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+      white-space: nowrap;
+    }
+    .del-btn:hover { background: rgba(255,139,160,0.26); }
+    .del-btn:disabled { opacity: .6; cursor: default; }
     .dash { color: var(--muted-2); }
 
     .empty-state, .loading-state { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 13.5px; }
@@ -631,6 +639,10 @@
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         Generate Terpilih
       </button>
+      <button class="del-btn" id="batchDelBtn" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Hapus Terpilih
+      </button>
       <button class="batch-cancel-btn" id="clearSelectionBtn">Batal</button>
     </div>
   </div>
@@ -768,6 +780,7 @@
     const ICON_DOWNLOAD = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     const ICON_BOLT = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
     const ICON_ZIP = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 
     // ---------- Load data ----------
     // forceFresh = true  -> panggil getAllDocumentsFresh() (bersihkan cache
@@ -1017,10 +1030,12 @@
 
       const genBtn = document.getElementById('batchGenBtn');
       const dlBtn = document.getElementById('downloadBtn');
+      const delBtn = document.getElementById('batchDelBtn');
       const dlSelect = document.getElementById('downloadFormat');
 
       genBtn.style.display = genCount > 0 ? 'inline-flex' : 'none';
       dlBtn.style.display = dlCount > 0 ? 'inline-flex' : 'none';
+      delBtn.style.display = dlCount > 0 ? 'inline-flex' : 'none';
       dlSelect.style.display = dlCount > 0 ? 'inline-block' : 'none';
     }
 
@@ -1120,7 +1135,41 @@
       });
     });
 
-    // ---------- Render table ----------
+    // ---------- Hapus massal (dokumen yang sudah dibuat, dipilih via checklist) ----------
+    document.getElementById('batchDelBtn').addEventListener('click', function () {
+      const items = allDocs
+        .filter(function (d) { return selectedKeys.has(rowKeyOf(d)) && d.status === 'Sudah Dibuat'; })
+        .map(function (d) { return { type: d.type, rowNumber: d.rowNumber, groupKey: d.groupKey || null, wordFileId: d.wordFileId, pdfFileId: d.pdfFileId }; });
+      if (items.length === 0) return;
+
+      const ok = window.confirm(
+        'Hapus ' + items.length + ' dokumen terpilih?\n\n' +
+        'File Word & PDF-nya akan dipindah ke Sampah Google Drive (bisa dipulihkan lagi lewat Sampah kalau salah hapus).'
+      );
+      if (!ok) return;
+
+      const btn = this;
+      btn.disabled = true;
+      btn.innerHTML = 'Menghapus...';
+
+      callApiPost('deleteDashboardDocument', { items: items }).then(function (res) {
+        btn.disabled = false;
+        btn.innerHTML = ICON_TRASH + ' Hapus Terpilih';
+        const total = res.successCount + res.failCount;
+        if (res.failCount === 0) {
+          showToast(res.successCount + ' dari ' + total + ' dokumen berhasil dihapus.', 'success');
+        } else {
+          showToast(res.successCount + ' berhasil, ' + res.failCount + ' gagal. ' + (res.messages && res.messages[0] ? res.messages[0] : ''), 'error');
+        }
+        selectedKeys.clear();
+        updateSelectionBar();
+        load(true);
+      }).catch(function (err) {
+        btn.disabled = false;
+        btn.innerHTML = ICON_TRASH + ' Hapus Terpilih';
+        showToast(err && err.message ? err.message : 'Terjadi kesalahan saat menghapus massal.', 'error');
+      });
+    });
     function docMatchesDateRange(d) {
       if (!currentDateFrom && !currentDateTo) return true;
       if (!d.createdDateSort) return false; // belum dibuat -> tidak punya tanggal
@@ -1174,7 +1223,12 @@
 
         let actionCell;
         if (d.status === 'Sudah Dibuat') {
-          actionCell = '<span class="dash">&mdash;</span>';
+          if (d.canGenerate && (d.wordFileId || d.pdfFileId)) {
+            const groupKeyArgDel = d.groupKey ? ('\'' + escapeAttr(d.groupKey) + '\'') : 'null';
+            actionCell = '<button class="del-btn" id="del-' + safeKey + '" onclick="deleteRow(\'' + escapeAttr(d.type) + '\',' + d.rowNumber + ',\'' + safeKey + '\',' + groupKeyArgDel + ',\'' + escapeAttr(d.wordFileId || '') + '\',\'' + escapeAttr(d.pdfFileId || '') + '\',\'' + escapeAttr(d.kepada || '') + '\')">' + ICON_TRASH + ' Hapus</button>';
+          } else {
+            actionCell = '<span class="dash">&mdash;</span>';
+          }
         } else if (d.canGenerate) {
           const groupKeyArg = d.groupKey ? ('\'' + escapeAttr(d.groupKey) + '\'') : 'null';
           actionCell = '<button class="gen-btn" id="gen-' + safeKey + '" onclick="generateRow(\'' + escapeAttr(d.type) + '\',' + d.rowNumber + ',\'' + safeKey + '\',' + groupKeyArg + ')">' + ICON_BOLT + ' Generate</button>';
@@ -1252,6 +1306,33 @@
       }).catch(function (err) {
         showToast(err && err.message ? err.message : 'Terjadi kesalahan.', 'error');
         if (btn) { btn.disabled = false; btn.innerHTML = ICON_BOLT + ' Generate'; }
+      });
+    }
+
+    // ---------- Hapus dokumen dari dashboard ----------
+    function deleteRow(type, rowNumber, safeKey, groupKey, wordFileId, pdfFileId, kepada) {
+      const ok = window.confirm(
+        'Hapus dokumen "' + kepada + '" (' + type + ')?\n\n' +
+        'File Word & PDF-nya akan dipindah ke Sampah Google Drive (bisa dipulihkan lagi lewat Sampah kalau salah hapus).'
+      );
+      if (!ok) return;
+
+      const btn = document.getElementById('del-' + safeKey);
+      if (btn) { btn.disabled = true; btn.innerHTML = 'Menghapus...'; }
+
+      callApiPost('deleteDashboardDocument', {
+        items: [{ type: type, rowNumber: rowNumber, groupKey: groupKey || null, wordFileId: wordFileId || null, pdfFileId: pdfFileId || null }]
+      }).then(function (res) {
+        if (res && res.successCount > 0) {
+          showToast('Dokumen berhasil dihapus.', 'success');
+          load(true);
+        } else {
+          showToast((res && res.messages && res.messages[0]) ? res.messages[0] : 'Gagal menghapus dokumen.', 'error');
+          if (btn) { btn.disabled = false; btn.innerHTML = ICON_TRASH + ' Hapus'; }
+        }
+      }).catch(function (err) {
+        showToast(err && err.message ? err.message : 'Terjadi kesalahan saat menghapus.', 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = ICON_TRASH + ' Hapus'; }
       });
     }
 

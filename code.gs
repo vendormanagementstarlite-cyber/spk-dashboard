@@ -1468,6 +1468,9 @@ function handleApiRequest_(action, params) {
       case 'downloadSelectedZip':
         result = downloadSelectedZip(params.items || [], params.format || 'both');
         break;
+      case 'deleteDashboardDocument':
+        result = deleteDashboardDocument(params.items || []);
+        break;
       default:
         return jsonOutput_({ error: 'Action tidak dikenal: ' + action });
     }
@@ -1918,6 +1921,85 @@ function generateDashboardBatch(items) {
 // items: array of { wordFileId, pdfFileId }
 // format: 'word' | 'pdf' | 'both'
 // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// Hapus dokumen (Word & PDF) langsung dari dashboard web, tanpa perlu buka
+// Google Drive manual. File dipindah ke SAMPAH Drive (setTrashed), BUKAN
+// dihapus permanen -- supaya masih bisa dipulihkan lewat Sampah Drive
+// kalau ternyata salah hapus. Kalau tab-nya punya kolom link (cuma
+// Takeover yang punya kolom DOKUMEN_WORD/DOKUMEN_PDF), link lama di sheet
+// juga dibersihkan supaya tidak menunjuk ke file yang sudah tidak ada.
+// items: array of { type, rowNumber, groupKey, wordFileId, pdfFileId }
+// ----------------------------------------------------------------------
+function deleteDashboardDocument(items) {
+  const access = getCurrentUserAccess_();
+  if (!access.canGenerate) {
+    throw new Error('Anda tidak memiliki izin untuk menghapus dokumen. Hubungi admin.');
+  }
+  if (!items || items.length === 0) {
+    return { successCount: 0, failCount: 0, messages: [] };
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+  const messages = [];
+  const sheetCache = {};
+
+  items.forEach(function (item) {
+    // Dibungkus try/catch per item, sama seperti generateDashboardBatch --
+    // supaya 1 item gagal (mis. file sudah kadung dihapus manual dari Drive)
+    // tidak menghentikan proses hapus item lain dalam batch yang sama.
+    const label = item.groupKey ? (item.type + ' "' + item.groupKey + '"') : (item.type + ' baris ' + item.rowNumber);
+    try {
+      const config = getConfigByType_(item.type);
+      if (!config) {
+        failCount++;
+        messages.push(label + ': jenis dokumen tidak dikenal.');
+        return;
+      }
+
+      let deletedAny = false;
+      if (item.wordFileId) {
+        try { DriveApp.getFileById(item.wordFileId).setTrashed(true); deletedAny = true; }
+        catch (e) { Logger.log('deleteDashboardDocument: gagal hapus Word (' + label + '): ' + e); }
+      }
+      if (item.pdfFileId) {
+        try { DriveApp.getFileById(item.pdfFileId).setTrashed(true); deletedAny = true; }
+        catch (e) { Logger.log('deleteDashboardDocument: gagal hapus PDF (' + label + '): ' + e); }
+      }
+
+      if (!deletedAny) {
+        failCount++;
+        messages.push(label + ': file tidak ditemukan di Drive (mungkin sudah dihapus sebelumnya).');
+        return;
+      }
+
+      // Bersihkan link lama di sheet, kalau tab ini punya kolom link.
+      if (!config.GROUPED && item.rowNumber && (config.COL.DOKUMEN_WORD || config.COL.DOKUMEN_PDF)) {
+        let sheet = sheetCache[config.SHEET_NAME];
+        if (!sheet) {
+          sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(config.SHEET_NAME);
+          sheetCache[config.SHEET_NAME] = sheet;
+        }
+        if (sheet) {
+          if (config.COL.DOKUMEN_WORD) sheet.getRange(item.rowNumber, config.COL.DOKUMEN_WORD).clearContent();
+          if (config.COL.DOKUMEN_PDF) sheet.getRange(item.rowNumber, config.COL.DOKUMEN_PDF).clearContent();
+        }
+      }
+
+      successCount++;
+      logGenerateAction_(item.type + ' (HAPUS)', item.groupKey || item.rowNumber, access.email);
+    } catch (err) {
+      failCount++;
+      messages.push(label + ': error tak terduga - ' + err);
+      Logger.log('deleteDashboardDocument item error (' + label + '): ' + err);
+    }
+  });
+
+  if (successCount > 0) invalidateDocsCache_();
+
+  return { successCount: successCount, failCount: failCount, messages: messages };
+}
+
 function downloadSelectedZip(items, format) {
   if (!items || items.length === 0) {
     throw new Error('Tidak ada dokumen yang dipilih.');
