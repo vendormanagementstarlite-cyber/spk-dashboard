@@ -1285,6 +1285,11 @@ function generateBBPercepatanForGroup_(sheet, config, groupKeyValue) {
 // ----------------------------------------------------------------------
 // KONTROL AKSES — silakan disesuaikan
 // ----------------------------------------------------------------------
+// Dashboard sekarang di-hosting di GitHub Pages (di luar Apps Script), jadi
+// email/identitas orang yang membuka dashboard TIDAK bisa lagi dideteksi
+// otomatis oleh Session.getActiveUser(). Sesuai keputusan: akses dibuka
+// untuk semua orang -- daftar tetap dikosongkan supaya semua email
+// dianggap admin (bisa generate) dan tidak ada pembatasan region.
 const ACCESS_CONFIG = {
   ADMIN_EMAILS: [],
   REGION_RESTRICTIONS: {}
@@ -1374,11 +1379,80 @@ function getConfigByType_(typeLabel) {
 // Web app entry point
 // ----------------------------------------------------------------------
 function doGet(e) {
+  // Kalau ada parameter ?action=..., ini adalah panggilan API JSON dari
+  // dashboard yang di-hosting di luar Apps Script (mis. GitHub Pages),
+  // bukan permintaan untuk membuka halaman HTML. Dipisah supaya dashboard
+  // Apps Script (Index.html) yang lama tetap bisa jalan seperti biasa.
+  if (e && e.parameter && e.parameter.action) {
+    return handleApiRequest_(e.parameter.action, e.parameter);
+  }
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle('SPK Dashboard')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// ----------------------------------------------------------------------
+// Endpoint POST — dipakai untuk aksi yang MENULIS data (generate dokumen,
+// generate massal, download ZIP), supaya tidak bisa "diulang" cuma dengan
+// membuka ulang sebuah URL seperti halnya GET.
+// PENTING: body dikirim sebagai JSON, tapi header Content-Type dari client
+// HARUS 'text/plain' (bukan 'application/json') supaya browser tidak
+// mengirim preflight OPTIONS -- Apps Script Web App tidak punya doOptions()
+// dan akan menolak preflight itu.
+// ----------------------------------------------------------------------
+function doPost(e) {
+  let body = {};
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonOutput_({ error: 'Body request tidak valid (bukan JSON): ' + err });
+  }
+  return handleApiRequest_(body.action, body);
+}
+
+// ----------------------------------------------------------------------
+// Router sederhana: memetakan nama "action" dari client ke fungsi backend
+// yang sudah ada, lalu membungkus hasilnya (atau error-nya) jadi JSON.
+// Ini pengganti google.script.run untuk dashboard yang di-hosting di luar
+// Apps Script (mis. GitHub Pages) dan hanya bisa memanggil lewat fetch().
+// ----------------------------------------------------------------------
+function handleApiRequest_(action, params) {
+  params = params || {};
+  try {
+    let result;
+    switch (action) {
+      case 'getAllDocuments':
+        result = getAllDocuments();
+        break;
+      case 'getAllDocumentsFresh':
+        result = getAllDocumentsFresh();
+        break;
+      case 'getRecentLogs':
+        result = getRecentLogs(Number(params.limit) || 50);
+        break;
+      case 'generateDashboardRow':
+        result = generateDashboardRow(params.type, Number(params.rowNumber), params.groupKey || null);
+        break;
+      case 'generateDashboardBatch':
+        result = generateDashboardBatch(params.items || []);
+        break;
+      case 'downloadSelectedZip':
+        result = downloadSelectedZip(params.items || [], params.format || 'both');
+        break;
+      default:
+        return jsonOutput_({ error: 'Action tidak dikenal: ' + action });
+    }
+    return jsonOutput_({ result: result });
+  } catch (err) {
+    return jsonOutput_({ error: (err && err.message) ? err.message : String(err) });
+  }
+}
+
+function jsonOutput_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function include(filename) {

@@ -742,10 +742,49 @@
     //   dari Google Drive (bukan lewat menu/dashboard).
     // forceFresh = false -> panggil getAllDocuments() biasa (boleh pakai
     //   cache s.d. 5 menit) supaya pembukaan pertama halaman tetap cepat.
+    // ======================================================================
+    // GANTI URL DI BAWAH INI dengan URL Web App Apps Script Anda sendiri
+    // (Deploy -> New deployment -> Web app -> Execute as: Me,
+    //  Who has access: Anyone -> Deploy -> copy URL yang berakhiran /exec)
+    // ======================================================================
+    const API_URL = 'https://script.google.com/macros/s/GANTI_DENGAN_DEPLOYMENT_ID_ANDA/exec';
+
+    // Panggilan BACA data (GET) -- dipakai untuk getAllDocuments,
+    // getAllDocumentsFresh, getRecentLogs. GET tidak pernah memicu
+    // preflight CORS, jadi paling aman untuk dipakai dari GitHub Pages.
+    function callApiGet(action, params) {
+      const qs = new URLSearchParams(Object.assign({ action: action }, params || {})).toString();
+      return fetch(API_URL + '?' + qs)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data && data.error) throw new Error(data.error);
+          return data.result;
+        });
+    }
+
+    // Panggilan TULIS data (POST) -- dipakai untuk generate/download.
+    // PENTING: Content-Type sengaja 'text/plain', BUKAN 'application/json'.
+    // Kalau pakai 'application/json', browser akan mengirim preflight
+    // OPTIONS dulu, dan Apps Script Web App akan menolaknya (tidak
+    // mendukung doOptions), sehingga request selalu gagal karena CORS.
+    function callApiPost(action, payload) {
+      return fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ action: action }, payload || {}))
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data && data.error) throw new Error(data.error);
+          return data.result;
+        });
+    }
+
     function load(forceFresh) {
       document.getElementById('tableWrap').innerHTML = '<div class="loading-state">Memuat data dari Google Sheet & Drive...</div>';
       setRefreshLoading(true);
-      const runner = google.script.run.withSuccessHandler(function (res) {
+      const action = forceFresh ? 'getAllDocumentsFresh' : 'getAllDocuments';
+      callApiGet(action).then(function (res) {
         setRefreshLoading(false);
         allDocs = res.docs;
         currentUser = res.user;
@@ -753,16 +792,11 @@
         renderSummary();
         pruneSelection();
         render();
-      }).withFailureHandler(function (err) {
+      }).catch(function (err) {
         setRefreshLoading(false);
         document.getElementById('tableWrap').innerHTML =
           '<div class="empty-state">Gagal memuat data: ' + (err && err.message ? err.message : err) + '</div>';
       });
-      if (forceFresh) {
-        runner.getAllDocumentsFresh();
-      } else {
-        runner.getAllDocuments();
-      }
     }
 
     function setRefreshLoading(isLoading) {
@@ -992,7 +1026,7 @@
       const btn = this;
       btn.disabled = true;
       btn.textContent = 'Memproses...';
-      google.script.run.withSuccessHandler(function (res) {
+      callApiPost('generateDashboardBatch', { items: items }).then(function (res) {
         btn.disabled = false;
         btn.innerHTML = ICON_BOLT + ' Generate Terpilih';
         const total = res.successCount + res.failCount;
@@ -1004,11 +1038,11 @@
         selectedKeys.clear();
         updateSelectionBar();
         load(true); // paksa segar setelah generate massal
-      }).withFailureHandler(function (err) {
+      }).catch(function (err) {
         btn.disabled = false;
         btn.innerHTML = ICON_BOLT + ' Generate Terpilih';
         showToast(err && err.message ? err.message : 'Terjadi kesalahan saat generate massal.', 'error');
-      }).generateDashboardBatch(items);
+      });
     });
 
     // ---------- Download ZIP massal ----------
@@ -1039,16 +1073,16 @@
       btn.disabled = true;
       btn.textContent = 'Menyiapkan ZIP...';
 
-      google.script.run.withSuccessHandler(function (res) {
+      callApiPost('downloadSelectedZip', { items: items, format: format }).then(function (res) {
         triggerBase64Download(res.base64, res.filename, res.mimeType);
         showToast(items.length + ' dokumen berhasil disiapkan dalam ZIP.', 'success');
         btn.disabled = false;
         btn.innerHTML = ICON_ZIP + ' Download ZIP';
-      }).withFailureHandler(function (err) {
+      }).catch(function (err) {
         btn.disabled = false;
         btn.innerHTML = ICON_ZIP + ' Download ZIP';
         showToast(err && err.message ? err.message : 'Gagal membuat ZIP.', 'error');
-      }).downloadSelectedZip(items, format);
+      });
     });
 
     // ---------- Render table ----------
@@ -1172,7 +1206,7 @@
     function generateRow(type, rowNumber, safeKey, groupKey) {
       const btn = document.getElementById('gen-' + safeKey);
       if (btn) { btn.disabled = true; btn.textContent = 'Memproses...'; }
-      google.script.run.withSuccessHandler(function (res) {
+      callApiPost('generateDashboardRow', { type: type, rowNumber: rowNumber, groupKey: groupKey || null }).then(function (res) {
         if (res && res.success) {
           showToast('Dokumen berhasil dibuat.', 'success');
           load(true); // paksa segar setelah generate satuan
@@ -1180,10 +1214,10 @@
           showToast((res && res.message) ? res.message : 'Gagal membuat dokumen.', 'error');
           if (btn) { btn.disabled = false; btn.innerHTML = ICON_BOLT + ' Generate'; }
         }
-      }).withFailureHandler(function (err) {
+      }).catch(function (err) {
         showToast(err && err.message ? err.message : 'Terjadi kesalahan.', 'error');
         if (btn) { btn.disabled = false; btn.innerHTML = ICON_BOLT + ' Generate'; }
-      }).generateDashboardRow(type, rowNumber, groupKey || null);
+      });
     }
 
     // ---------- Preview modal ----------
@@ -1205,7 +1239,7 @@
     document.getElementById('logBtn').addEventListener('click', function () {
       document.getElementById('logOverlay').classList.add('open');
       document.getElementById('logList').innerHTML = '<div class="log-empty">Memuat riwayat...</div>';
-      google.script.run.withSuccessHandler(function (logs) {
+      callApiGet('getRecentLogs', { limit: 50 }).then(function (logs) {
         if (!logs || logs.length === 0) {
           document.getElementById('logList').innerHTML = '<div class="log-empty">Belum ada riwayat generate.</div>';
           return;
@@ -1219,9 +1253,9 @@
             '</div>';
         });
         document.getElementById('logList').innerHTML = html;
-      }).withFailureHandler(function (err) {
+      }).catch(function (err) {
         document.getElementById('logList').innerHTML = '<div class="log-empty">Gagal memuat riwayat.</div>';
-      }).getRecentLogs(50);
+      });
     });
     document.getElementById('logClose').addEventListener('click', function () {
       document.getElementById('logOverlay').classList.remove('open');
