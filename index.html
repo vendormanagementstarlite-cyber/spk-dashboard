@@ -1667,5 +1667,23 @@
     // supaya dashboard terbuka cepat.
     load(false);
   </script>
+
+  <!-- FAVICON TAB BROWSER: menggunakan logo Starlite yang sudah ada -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const logo = document.querySelector('.header-brand img');
+
+      if (logo && logo.src) {
+        let favicon = document.querySelector('link[rel="icon"]');
+        if (!favicon) {
+          favicon = document.createElement('link');
+          favicon.rel = 'icon';
+          favicon.type = 'image/png';
+          document.head.appendChild(favicon);
+        }
+        favicon.href = logo.src;
+      }
+    });
+  </script>
 </body>
 </html>
