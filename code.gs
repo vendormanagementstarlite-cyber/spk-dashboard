@@ -570,7 +570,6 @@ function onOpen() {
     .addItem('Aktifkan auto-generate saat input data', 'setupTrigger')
     .addItem('Nonaktifkan auto-generate saat input data', 'removeAutoGenerateTrigger')
     .addItem('Bersihkan cache dashboard', 'bersihkanCacheManual')
-    .addItem('Bersihkan file gabungan cetak lama', 'bersihkanFileGabunganLama_')
     .addToUi();
 }
 
@@ -1423,8 +1422,8 @@ function doGet(e) {
 
 // ----------------------------------------------------------------------
 // Endpoint POST — dipakai untuk aksi yang MENULIS data (generate dokumen,
-// generate massal, download ZIP, gabung cetak massal), supaya tidak bisa
-// "diulang" cuma dengan membuka ulang sebuah URL seperti halnya GET.
+// generate massal, download ZIP), supaya tidak bisa "diulang" cuma dengan
+// membuka ulang sebuah URL seperti halnya GET.
 // PENTING: body dikirim sebagai JSON, tapi header Content-Type dari client
 // HARUS 'text/plain' (bukan 'application/json') supaya browser tidak
 // mengirim preflight OPTIONS -- Apps Script Web App tidak punya doOptions()
@@ -1472,12 +1471,6 @@ function handleApiRequest_(action, params) {
       case 'deleteDashboardDocument':
         result = deleteDashboardDocument(params.items || []);
         break;
-      // 'mergeSelectedForPrint' sengaja tidak lagi didaftarkan di sini --
-      // dashboard sekarang pakai "Cetak Massal (Per File)" yang memakai
-      // langsung link Word/PDF yang sudah ada per dokumen (tanpa gabung),
-      // jadi tidak perlu panggilan server ini. Fungsi mergeSelectedForPrint_
-      // di bawah tetap disimpan (tidak dihapus) kalau suatu saat mau
-      // diaktifkan kembali -- tinggal uncomment case di atas.
       default:
         return jsonOutput_({ error: 'Action tidak dikenal: ' + action });
     }
@@ -2094,145 +2087,6 @@ function getRecentLogs(limit) {
       baris: r[3]
     };
   });
-}
-
-// ======================================================================
-// PREVIEW GABUNGAN & CETAK MASSAL
-// ======================================================================
-// Menggabungkan beberapa dokumen Word (Google Docs) yang sudah dibuat
-// jadi SATU dokumen (dipisah page break di antara tiap dokumen), lalu
-// diekspor jadi SATU file PDF gabungan supaya bisa di-preview & dicetak
-// sekaligus dari dashboard (tombol "Preview & Cetak Massal").
-//
-// PENTING: ganti MERGED_TEMP_FOLDER_ID di bawah dengan ID folder Drive
-// khusus (buat 1 folder baru di Drive, lalu ambil ID-nya dari URL-nya)
-// yang dipakai untuk menyimpan file gabungan SEMENTARA. File di folder
-// ini otomatis boleh dihapus kapan saja -- jalankan
-// bersihkanFileGabunganLama_() sesekali (lewat menu "Pengaturan
-// Otomatis > Bersihkan file gabungan cetak lama", atau pasang
-// time-based trigger harian) supaya folder ini tidak menumpuk.
-// ======================================================================
-const MERGED_TEMP_FOLDER_ID = 'ISI_ID_FOLDER_DRIVE_BARU_DI_SINI';
-
-function mergeSelectedForPrint(items) {
-  if (!items || items.length === 0) {
-    throw new Error('Tidak ada dokumen yang dipilih untuk digabung.');
-  }
-  if (items.length > 40) {
-    throw new Error('Maksimal 40 dokumen sekaligus (supaya tidak timeout).');
-  }
-
-  const tempFolder = withRetry_(function () {
-    return DriveApp.getFolderById(MERGED_TEMP_FOLDER_ID);
-  }, 3, 'getFolderById MERGED_TEMP');
-
-  const mergedName = 'GABUNGAN_CETAK_' +
-    Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
-  const mergedDoc = DocumentApp.create(mergedName);
-  const mergedFile = DriveApp.getFileById(mergedDoc.getId());
-  tempFolder.addFile(mergedFile);
-  DriveApp.getRootFolder().removeFile(mergedFile);
-
-  const mergedBody = mergedDoc.getBody();
-  mergedBody.clear();
-
-  let successCount = 0;
-  const failedLabels = [];
-
-  items.forEach(function (item, idx) {
-    if (!item.wordFileId) {
-      failedLabels.push(item.kepada || ('item ' + (idx + 1)));
-      return;
-    }
-    try {
-      const srcBody = DocumentApp.openById(item.wordFileId).getBody();
-      if (successCount > 0) mergedBody.appendPageBreak();
-      const total = srcBody.getNumChildren();
-      for (let i = 0; i < total; i++) {
-        copyElementToBody_(mergedBody, srcBody.getChild(i));
-      }
-      successCount++;
-    } catch (err) {
-      Logger.log('mergeSelectedForPrint gagal (' + (item.kepada || item.wordFileId) + '): ' + err);
-      failedLabels.push(item.kepada || item.wordFileId);
-    }
-  });
-
-  mergedDoc.saveAndClose();
-
-  if (successCount === 0) {
-    mergedFile.setTrashed(true);
-    throw new Error('Gagal menggabungkan dokumen manapun: ' + failedLabels.join(', '));
-  }
-
-  const pdfBlob = mergedFile.getAs(MimeType.PDF).setName(mergedName + '.pdf');
-  const pdfFile = tempFolder.createFile(pdfBlob);
-
-  try {
-    withRetry_(function () {
-      mergedFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-      pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    }, 3, 'setSharing (merged)');
-  } catch (sharingErr) {
-    Logger.log('mergeSelectedForPrint: setSharing gagal, dilewati: ' + sharingErr);
-  }
-
-  return {
-    successCount: successCount,
-    failCount: failedLabels.length,
-    failedLabels: failedLabels,
-    pdfFileId: pdfFile.getId(),
-    pdfPreviewUrl: 'https://drive.google.com/file/d/' + pdfFile.getId() + '/preview',
-    pdfViewUrl: pdfFile.getUrl(),
-    pdfDownloadUrl: 'https://drive.google.com/uc?export=download&id=' + pdfFile.getId()
-  };
-}
-
-// Salin 1 elemen body dokumen sumber ke dokumen gabungan. Menangani
-// jenis elemen paling umum di template SPK (paragraf, tabel, list,
-// gambar, page break, garis horizontal). Jenis lain dilewati dengan
-// aman -- tidak menghentikan proses gabungan, cukup dicatat di Logs.
-function copyElementToBody_(body, element) {
-  switch (element.getType()) {
-    case DocumentApp.ElementType.PARAGRAPH:
-      body.appendParagraph(element.copy());
-      break;
-    case DocumentApp.ElementType.TABLE:
-      body.appendTable(element.copy());
-      break;
-    case DocumentApp.ElementType.LIST_ITEM:
-      body.appendListItem(element.copy());
-      break;
-    case DocumentApp.ElementType.INLINE_IMAGE:
-      body.appendImage(element.asInlineImage().getBlob());
-      break;
-    case DocumentApp.ElementType.PAGE_BREAK:
-      body.appendPageBreak();
-      break;
-    case DocumentApp.ElementType.HORIZONTAL_RULE:
-      body.appendHorizontalRule();
-      break;
-    default:
-      Logger.log('copyElementToBody_: elemen "' + element.getType() + '" dilewati.');
-  }
-}
-
-// Jalankan manual sesekali dari editor Apps Script (atau pasang
-// time-based trigger harian lewat Triggers) untuk membersihkan file
-// gabungan sementara yang lebih tua dari 1 hari, supaya folder
-// MERGED_TEMP_FOLDER_ID tidak menumpuk file lama.
-function bersihkanFileGabunganLama_() {
-  const folder = DriveApp.getFolderById(MERGED_TEMP_FOLDER_ID);
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const it = folder.getFiles();
-  let removed = 0;
-  while (it.hasNext()) {
-    const f = it.next();
-    if (f.getDateCreated() < cutoff) { f.setTrashed(true); removed++; }
-  }
-  const ui = (function () { try { return SpreadsheetApp.getUi(); } catch (e) { return null; } })();
-  if (ui) ui.alert(removed + ' file gabungan lama berhasil dibersihkan.');
-  Logger.log('bersihkanFileGabunganLama_: ' + removed + ' file dihapus.');
 }
 
 function tesAksesDrive() {
